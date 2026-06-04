@@ -5,7 +5,7 @@ from pathlib import Path
 
 # 页面配置
 st.set_page_config(
-    page_title='产品介绍 - 上市公司分析平台',
+    page_title='上市公司行业重分类智能财务机器人',
     page_icon='📖',
     layout='wide'
 )

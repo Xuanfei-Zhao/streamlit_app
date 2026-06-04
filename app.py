@@ -250,7 +250,4 @@ else:
         if st.button("前往管理建议 →", key="go_to_advice", type="secondary"):
             st.switch_page("pages/4_管理建议.py")
 
-# ----------------------------------------------------------------------------- 
-# 页脚 
-st.markdown("---") 
-st.caption("© 2020-2024 上市公司分析平台 | 数据来源: complete_company_industry_mapping_v4_stage16D_checked.xlsx")
+

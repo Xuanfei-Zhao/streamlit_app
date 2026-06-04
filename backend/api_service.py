@@ -23,8 +23,8 @@ class FinancialAIReport:
         self._financial_data = None
         self._dimension_json = None
         self._comprehensive_json = None
-        self._dimension_scores = None          # 新增：公司各纬度得分.csv
-        self._yearly_financial = None          # 新增：financial_with_classification.csv
+        self._dimension_scores = None          
+        self._yearly_financial = None          
         self._benchmark_data = None
         self._cross_industry = None
         self._industry_keywords = None
@@ -32,24 +32,16 @@ class FinancialAIReport:
         self._load_all_data()
 
     def _normalize_code(self, code: str) -> str:
-        if code is None:
-            return ''
         code_str = str(code).strip()
-    # 去掉小数点及之后部分（如 '1.0' -> '1'）
-        if '.' in code_str:
-            code_str = code_str.split('.')[0]
-    # 如果是纯数字，补零到6位；否则原样返回
-        if code_str.isdigit():
-            return code_str.zfill(6)
-        return code_str
-           
-
+        if code_str.endswith('.0'):
+            code_str = code_str[:-2]
+        return code_str.zfill(6) if code_str.isdigit() else code_str
 
     def _load_all_data(self):
         print("[后端] 正在加载数据文件...")
-        
+
         try:
-            df = pd.read_excel('complete_company_industry_mapping_v5_qwen_level1_final.xlsx', engine="openpyxl")
+            df = pd.read_excel('complete_company_industry_mapping_v5_qwen_level1_final.xlsx', engine="openpyxl")        
         
         # ----- 1. 查找股票代码列 -----
             code_col = None
@@ -111,18 +103,16 @@ class FinancialAIReport:
                 df.rename(columns={code_col: 'stock_code'}, inplace=True)
             # 去重：取最新一期数据
             if 'accper' in df.columns:
-                # 将 accper 转换为数值（例如 "2024" -> 2024）
                 df['accper_num'] = pd.to_numeric(df['accper'], errors='coerce')
-                # 按股票代码和年份降序排序
                 df = df.sort_values(['stock_code', 'accper_num'], ascending=[True, False])
-                # 每个股票代码保留第一行（最晚年份）
                 df = df.drop_duplicates(subset=['stock_code'], keep='first')
-                # 删除辅助列
                 df.drop(columns=['accper_num'], inplace=True)
             self._financial_data = df
             print(f"  财务指标数据(新数据源): {len(df)} 条记录")
         except Exception as e:
             print(f"  财务指标加载失败: {e}")
+
+
 
         try:
             with open('公司各维度雷达图数据（可直接用于streamlit）.json', 'r', encoding='utf-8') as f:
@@ -138,7 +128,7 @@ class FinancialAIReport:
         except Exception as e:
             print(f"  综合雷达图加载失败: {e}")
 
-        # ===== 新增：公司各纬度得分.csv（替代旧的公司五年数据趋势分析.csv）=====
+        # ===== 新增：公司各纬度得分.csv =====
         try:
             df = pd.read_csv('公司各纬度得分.csv', encoding='utf-8')
             code_col = None
@@ -287,23 +277,38 @@ class FinancialAIReport:
         code = self._normalize_code(stock_code)
         rankings = {}
 
-        # ===== 更新：使用 _raw_value / _raw_median / _percentile / _rank 后缀 =====
+        # ===== 与前端 data_loader.py 的 get_company_financial_rankings 保持一致 =====
+        # 前端使用英文 key，列名后缀为 _value / _median / _percentile / _rank
         if self._benchmark_data is not None:
             company_data = self._benchmark_data[self._benchmark_data['company_code'] == code]
             if not company_data.empty:
-                raw_value_cols = [c for c in company_data.columns if c.endswith('_raw_value')]
-                for vcol in raw_value_cols:
-                    indicator = vcol[:-10]  # 去掉 '_raw_value'
-                    median_col = indicator + '_raw_median'
-                    percentile_col = indicator + '_percentile'
-                    rank_col = indicator + '_rank'
+                # 指标映射：英文 key -> 中文列名前缀
+                indicator_map = {
+                    'roe': '权益资本利润率ROE',
+                    'operating_margin': '营业利润率',
+                    'roa': '总资产利润率ROA',
+                    'ebitda_margin': 'EBITDA利润率',
+                    'asset_turnover': '总资产周转率',
+                    'current_ratio': '流动比率',
+                    'debt_ratio': '总资产负债率',
+                    'inventory_turnover': '存货周转率',
+                    'cash_creation_total': '总资产创现率',
+                    'cash_creation_sales': '销售创现率',
+                }
 
-                    rankings[indicator] = {
-                        '公司值': company_data[vcol].values[0] if vcol in company_data.columns else None,
-                        '行业中位数': company_data[median_col].values[0] if median_col in company_data.columns else None,
-                        '分位数': company_data[percentile_col].values[0] if percentile_col in company_data.columns else None,
-                        '行业排名': company_data[rank_col].values[0] if rank_col in company_data.columns else None
-                    }
+                for en_key, cn_prefix in indicator_map.items():
+                    vcol = cn_prefix + '_value'
+                    median_col = cn_prefix + '_median'
+                    percentile_col = cn_prefix + '_percentile'
+                    rank_col = cn_prefix + '_rank'
+
+                    if vcol in company_data.columns:
+                        rankings[en_key] = {
+                            'value': company_data[vcol].values[0],
+                            'median': company_data[median_col].values[0] if median_col in company_data.columns else None,
+                            'percentile': company_data[percentile_col].values[0] if percentile_col in company_data.columns else None,
+                            'rank': company_data[rank_col].values[0] if rank_col in company_data.columns else None
+                        }
 
         return rankings
 
@@ -393,7 +398,7 @@ class FinancialAIReport:
                             }
                     break
 
-        # 合并行业基准数据（使用新数据源的 _raw_median 等列）
+        # 合并行业基准数据（与前端 data_loader.py 的列名后缀保持一致：_value / _median / _percentile / _rank）
         if self._benchmark_data is not None:
             company_data = self._benchmark_data[self._benchmark_data['company_code'] == code]
             if not company_data.empty:
@@ -403,9 +408,9 @@ class FinancialAIReport:
                     percentiles = []
                     ranks = []
                     for ind in indicators:
-                        # ===== 更新：使用 _raw_value / _raw_median / _percentile / _rank =====
-                        vcol = ind + '_raw_value'
-                        mcol = ind + '_raw_median'
+                        # 与前端 data_loader.py 的列名后缀一致
+                        vcol = ind + '_value'
+                        mcol = ind + '_median'
                         pcol = ind + '_percentile'
                         rcol = ind + '_rank'
                         industry_medians.append(company_data[mcol].values[0] if mcol in company_data.columns else None)
@@ -478,15 +483,16 @@ class FinancialAIReport:
 
         return similar
 
+
     # ==================== 模块化AI分析函数 ====================
 
     # ---------- 1. 行业分类页 ----------
 
     def analyze_company_overview(self, stock_code: str) -> str:
         """模块1：公司概况AI解读（对应1_行业分类.py顶部公司信息）"""
-        code = self._normalize_code(stock_code)          # 标准化股票代码
-        company_name = self.get_company_name(code)       # 获取公司名称
-        industry_info = self.get_industry_info(code)     # 获取行业信息
+        code = self._normalize_code(stock_code)
+        company_name = self.get_company_name(code)
+        industry_info = self.get_industry_info(code)
 
         data_lines = [
             "公司名称: " + company_name,
@@ -499,7 +505,6 @@ class FinancialAIReport:
         data = "\n".join(data_lines)
 
         prompt_lines = [
-            
             "请基于以下公司基本信息，生成一段专业的公司概况AI解读。"
             "严格要求："
             "直接输出最终分析内容，"
@@ -647,7 +652,7 @@ class FinancialAIReport:
 
         prompt_lines = [
             "请基于以下同行业相似公司数据，生成一段专业的AI解读。",
-            "严格要求：",
+            "严格要求："
             "直接输出最终分析内容，"
             "不要出现任何前言、身份说明或解释"
             "禁止使用以下表达："
@@ -678,18 +683,18 @@ class FinancialAIReport:
         company_name = self.get_company_name(code)
         rankings = self.get_financial_rankings(code)
 
-        roe_data = rankings.get('权益资本利润率ROE', {})
-        if not roe_data or roe_data.get('公司值') is None:
+        roe_data = rankings.get('roe', {})
+        if not roe_data or roe_data.get('value') is None:
             return "ROE数据缺失，无法生成分析。"
 
-        median_str = str(roe_data['行业中位数']) if roe_data['行业中位数'] is not None else 'N/A'
-        rank_str = str(int(roe_data['行业排名'])) if roe_data['行业排名'] is not None and not pd.isna(roe_data['行业排名']) else 'N/A'
-        pct_str = str(round(roe_data['分位数']*100, 1)) + "%" if roe_data['分位数'] is not None else 'N/A'
+        median_str = str(roe_data['median']) if roe_data['median'] is not None else 'N/A'
+        rank_str = str(int(roe_data['rank'])) if roe_data['rank'] is not None and not pd.isna(roe_data['rank']) else 'N/A'
+        pct_str = str(round(roe_data['percentile']*100, 1)) + "%" if roe_data['percentile'] is not None else 'N/A'
 
         data_lines = [
             "公司名称: " + company_name,
             "权益资本利润率(ROE):",
-            "  公司值: " + str(roe_data['公司值']),
+            "  公司值: " + str(roe_data['value']),
             "  行业中位数: " + median_str,
             "  行业排名: " + rank_str + " (1为最优)",
             "  百分位: " + pct_str + " (越高越好)"
@@ -698,7 +703,7 @@ class FinancialAIReport:
 
         prompt_lines = [
             "请基于以下ROE排名数据，生成一段专业的AI解读。",
-            "严格要求：",
+            "严格要求："
             "直接输出最终分析内容，"
             "不要出现任何前言、身份说明或解释"
             "禁止使用以下表达："
@@ -727,18 +732,18 @@ class FinancialAIReport:
         company_name = self.get_company_name(code)
         rankings = self.get_financial_rankings(code)
 
-        margin_data = rankings.get('营业利润率', {})
-        if not margin_data or margin_data.get('公司值') is None:
+        margin_data = rankings.get('operating_margin', {})
+        if not margin_data or margin_data.get('value') is None:
             return "营业利润率数据缺失，无法生成分析。"
 
-        median_str = str(margin_data['行业中位数']) if margin_data['行业中位数'] is not None else 'N/A'
-        rank_str = str(int(margin_data['行业排名'])) if margin_data['行业排名'] is not None and not pd.isna(margin_data['行业排名']) else 'N/A'
-        pct_str = str(round(margin_data['分位数']*100, 1)) + "%" if margin_data['分位数'] is not None else 'N/A'
+        median_str = str(margin_data['median']) if margin_data['median'] is not None else 'N/A'
+        rank_str = str(int(margin_data['rank'])) if margin_data['rank'] is not None and not pd.isna(margin_data['rank']) else 'N/A'
+        pct_str = str(round(margin_data['percentile']*100, 1)) + "%" if margin_data['percentile'] is not None else 'N/A'
 
         data_lines = [
             "公司名称: " + company_name,
             "营业利润率:",
-            "  公司值: " + str(margin_data['公司值']),
+            "  公司值: " + str(margin_data['value']),
             "  行业中位数: " + median_str,
             "  行业排名: " + rank_str + " (1为最优)",
             "  百分位: " + pct_str + " (越高越好)"
@@ -747,7 +752,7 @@ class FinancialAIReport:
 
         prompt_lines = [
             "请基于以下营业利润率排名数据，生成一段专业的AI解读。",
-            "严格要求：",
+            "严格要求："
             "直接输出最终分析内容，"
             "不要出现任何前言、身份说明或解释"
             "禁止使用以下表达："
@@ -776,18 +781,18 @@ class FinancialAIReport:
         company_name = self.get_company_name(code)
         rankings = self.get_financial_rankings(code)
 
-        roa_data = rankings.get('总资产利润率ROA', {})
-        if not roa_data or roa_data.get('公司值') is None:
+        roa_data = rankings.get('roa', {})
+        if not roa_data or roa_data.get('value') is None:
             return "ROA数据缺失，无法生成分析。"
 
-        median_str = str(roa_data['行业中位数']) if roa_data['行业中位数'] is not None else 'N/A'
-        rank_str = str(int(roa_data['行业排名'])) if roa_data['行业排名'] is not None and not pd.isna(roa_data['行业排名']) else 'N/A'
-        pct_str = str(round(roa_data['分位数']*100, 1)) + "%" if roa_data['分位数'] is not None else 'N/A'
+        median_str = str(roa_data['median']) if roa_data['median'] is not None else 'N/A'
+        rank_str = str(int(roa_data['rank'])) if roa_data['rank'] is not None and not pd.isna(roa_data['rank']) else 'N/A'
+        pct_str = str(round(roa_data['percentile']*100, 1)) + "%" if roa_data['percentile'] is not None else 'N/A'
 
         data_lines = [
             "公司名称: " + company_name,
             "总资产利润率(ROA):",
-            "  公司值: " + str(roa_data['公司值']),
+            "  公司值: " + str(roa_data['value']),
             "  行业中位数: " + median_str,
             "  行业排名: " + rank_str + " (1为最优)",
             "  百分位: " + pct_str + " (越高越好)"
@@ -796,7 +801,7 @@ class FinancialAIReport:
 
         prompt_lines = [
             "请基于以下ROA排名数据，生成一段专业的AI解读。",
-            "严格要求：",
+            "严格要求："
             "直接输出最终分析内容，"
             "不要出现任何前言、身份说明或解释"
             "禁止使用以下表达："
@@ -826,21 +831,30 @@ class FinancialAIReport:
         rankings = self.get_financial_rankings(code)
 
         rankings_lines = []
-        key_metrics = ['权益资本利润率ROE', '营业利润率', '总资产利润率ROA',
-                       '总资产周转率', '流动比率', '总资产负债率',
-                       '总资产创现率', '销售创现率', 'EBITDA利润率']
-        for metric in key_metrics:
-            if metric in rankings:
-                r = rankings[metric]
-                val = r['公司值']
-                median = r['行业中位数']
-                pct = r['分位数']
-                rank = r['行业排名']
+        # 英文 key -> 中文显示名 映射
+        metric_display_map = {
+            'roe': '权益资本利润率ROE',
+            'operating_margin': '营业利润率',
+            'roa': '总资产利润率ROA',
+            'asset_turnover': '总资产周转率',
+            'current_ratio': '流动比率',
+            'debt_ratio': '总资产负债率',
+            'cash_creation_total': '总资产创现率',
+            'cash_creation_sales': '销售创现率',
+            'ebitda_margin': 'EBITDA利润率',
+        }
+        for en_key, display_name in metric_display_map.items():
+            if en_key in rankings:
+                r = rankings[en_key]
+                val = r['value']
+                median = r['median']
+                pct = r['percentile']
+                rank = r['rank']
                 if val is not None and not pd.isna(val):
                     pct_str = str(round(pct * 100, 1)) + "%" if pct is not None and not pd.isna(pct) else "N/A"
                     rank_str = str(int(rank)) if rank is not None and not pd.isna(rank) else "N/A"
                     vs_median = "高于" if val > median else "低于"
-                    line = metric + ": 公司值" + str(round(val, 4)) + " | 行业中位数" + str(round(median, 4) if median is not None else 'N/A') + " | " + vs_median + "中位数 | 分位数" + pct_str + " | 排名" + rank_str
+                    line = display_name + ": 公司值" + str(round(val, 4)) + " | 行业中位数" + str(round(median, 4) if median is not None else 'N/A') + " | " + vs_median + "中位数 | 分位数" + pct_str + " | 排名" + rank_str
                     rankings_lines.append(line)
 
         if not rankings_lines:
@@ -856,7 +870,7 @@ class FinancialAIReport:
 
         prompt_lines = [
             "请基于以下财务指标排名总览数据，生成一段全面的AI解读。",
-            "严格要求：",
+            "严格要求："
             "直接输出最终分析内容，"
             "不要出现任何前言、身份说明或解释"
             "禁止使用以下表达："
@@ -904,7 +918,7 @@ class FinancialAIReport:
 
         prompt_lines = [
             "请基于以下综合维度雷达图数据，生成一段专业的AI解读。",
-            "严格要求：",
+            "严格要求："
             "直接输出最终分析内容，"
             "不要出现任何前言、身份说明或解释"
             "禁止使用以下表达："
@@ -954,7 +968,16 @@ class FinancialAIReport:
         data = "\n".join(data_lines)
 
         prompt_lines = [
-            "你是一位资深财务分析师。请基于以下指标级雷达图数据，生成一段专业的AI解读。",
+            "请基于以下指标级雷达图数据，生成一段专业的AI解读。",
+            "严格要求："
+            "直接输出最终分析内容，"
+            "不要出现任何前言、身份说明或解释"
+            "禁止使用以下表达："
+            "1. 作为一位……"
+            "2. 根据您提供的信息……"
+            "3. 我认为……"
+            "4. 我将从……分析"
+            "5. 以下是分析……",
             "要求：",
             "1. 分析每个能力维度下的具体指标表现",
             "2. 指出各维度内部的强项和弱项指标",
@@ -1009,7 +1032,7 @@ class FinancialAIReport:
 
         prompt_lines = [
             "请基于以下综合财务雷达图和趋势数据，生成一段全面的AI解读。",
-            "严格要求：",
+            "严格要求："
             "直接输出最终分析内容，"
             "不要出现任何前言、身份说明或解释"
             "禁止使用以下表达："
@@ -1065,13 +1088,13 @@ class FinancialAIReport:
         prompt_lines = [
             "请基于以下维度得分趋势数据，生成一段专业的AI解读。",
             "严格要求：",
-            "直接输出最终分析内容，"
-            "不要出现任何前言、身份说明或解释"
-            "禁止使用以下表达："
-            "1. 作为一位……"
-            "2. 根据您提供的信息……"
-            "3. 我认为……"
-            "4. 我将从……分析"
+            "直接输出最终分析内容，",
+            "不要出现任何前言、身份说明或解释",
+            "禁止使用以下表达：",
+            "1. 作为一位……",
+            "2. 根据您提供的信息……",
+            "3. 我认为……",
+            "4. 我将从……分析",
             "5. 以下是分析……",
             "要求：",
             "1. 分析公司五年来的整体发展轨迹",
@@ -1140,16 +1163,7 @@ class FinancialAIReport:
         data = "\n".join(data_lines)
 
         prompt_lines = [
-            "请基于以下盈利能力指标数据，生成一段专业的AI解读。",
-            "严格要求：",
-            "直接输出最终分析内容，"
-            "不要出现任何前言、身份说明或解释"
-            "禁止使用以下表达："
-            "1. 作为一位……"
-            "2. 根据您提供的信息……"
-            "3. 我认为……"
-            "4. 我将从……分析"
-            "5. 以下是分析……",
+            "你是一位资深财务分析师。请基于以下盈利能力指标数据，生成一段专业的AI解读。",
             "要求：",
             "1. 分析公司盈利能力的整体水平和结构特征",
             "2. 对比行业均值，评价各盈利指标的相对强弱",
@@ -1194,14 +1208,15 @@ class FinancialAIReport:
         prompt_lines = [
             "请基于以下资产使用效率指标数据，生成一段专业的AI解读。",
             "严格要求：",
-            "直接输出最终分析内容，"
-            "不要出现任何前言、身份说明或解释"
-            "禁止使用以下表达："
-            "1. 作为一位……"
-            "2. 根据您提供的信息……"
-            "3. 我认为……"
-            "4. 我将从……分析"
+            "直接输出最终分析内容，",
+            "不要出现任何前言、身份说明或解释",
+            "禁止使用以下表达：",
+            "1. 作为一位……",
+            "2. 根据您提供的信息……",
+            "3. 我认为……",
+            "4. 我将从……分析",
             "5. 以下是分析……",
+            "",
             "要求：",
             "1. 分析公司资产运营效率的整体水平",
             "2. 对比行业均值，评价各效率指标的相对强弱",
@@ -1246,13 +1261,13 @@ class FinancialAIReport:
         prompt_lines = [
             "请基于以下流动性指标数据，生成一段专业的AI解读。",
             "严格要求：",
-            "直接输出最终分析内容，"
-            "不要出现任何前言、身份说明或解释"
-            "禁止使用以下表达："
-            "1. 作为一位……"
-            "2. 根据您提供的信息……"
-            "3. 我认为……"
-            "4. 我将从……分析"
+            "直接输出最终分析内容，",
+            "不要出现任何前言、身份说明或解释",
+            "禁止使用以下表达：",
+            "1. 作为一位……",
+            "2. 根据您提供的信息……",
+            "3. 我认为……",
+            "4. 我将从……分析",
             "5. 以下是分析……",
             "要求：",
             "1. 分析公司流动性的整体水平和安全边际",
@@ -1298,13 +1313,13 @@ class FinancialAIReport:
         prompt_lines = [
             "请基于以下现金创造能力指标数据，生成一段专业的AI解读。",
             "严格要求：",
-            "直接输出最终分析内容，"
-            "不要出现任何前言、身份说明或解释"
-            "禁止使用以下表达："
-            "1. 作为一位……"
-            "2. 根据您提供的信息……"
-            "3. 我认为……"
-            "4. 我将从……分析"
+            "直接输出最终分析内容，",
+            "不要出现任何前言、身份说明或解释",
+            "禁止使用以下表达：",
+            "1. 作为一位……",
+            "2. 根据您提供的信息……",
+            "3. 我认为……",
+            "4. 我将从……分析",
             "5. 以下是分析……",
             "要求：",
             "1. 分析公司现金创造能力的整体水平",
@@ -1350,13 +1365,13 @@ class FinancialAIReport:
         prompt_lines = [
             "请基于以下偿债能力指标数据，生成一段专业的AI解读。",
             "严格要求：",
-            "直接输出最终分析内容，"
-            "不要出现任何前言、身份说明或解释"
-            "禁止使用以下表达："
-            "1. 作为一位……"
-            "2. 根据您提供的信息……"
-            "3. 我认为……"
-            "4. 我将从……分析"
+            "直接输出最终分析内容，",
+            "不要出现任何前言、身份说明或解释",
+            "禁止使用以下表达：",
+            "1. 作为一位……",
+            "2. 根据您提供的信息……",
+            "3. 我认为……",
+            "4. 我将从……分析",
             "5. 以下是分析……",
             "要求：",
             "1. 分析公司偿债能力的整体水平和财务安全性",
@@ -1402,13 +1417,13 @@ class FinancialAIReport:
         prompt_lines = [
             "请基于以下股东收益指标数据，生成一段专业的AI解读。",
             "严格要求：",
-            "直接输出最终分析内容，"
-            "不要出现任何前言、身份说明或解释"
-            "禁止使用以下表达："
-            "1. 作为一位……"
-            "2. 根据您提供的信息……"
-            "3. 我认为……"
-            "4. 我将从……分析"
+            "直接输出最终分析内容，",
+            "不要出现任何前言、身份说明或解释",
+            "禁止使用以下表达：",
+            "1. 作为一位……",
+            "2. 根据您提供的信息……",
+            "3. 我认为……",
+            "4. 我将从……分析",
             "5. 以下是分析……",
             "要求：",
             "1. 分析公司为股东创造价值的能力",
@@ -1438,16 +1453,23 @@ class FinancialAIReport:
         # 计算各维度的综合判断
         advantages = []
         weaknesses = []
-        for ind in ['权益资本利润率ROE', '营业利润率', '总资产利润率ROA',
-                    '总资产周转率', '流动比率', '总资产负债率']:
-            if ind in rankings:
-                r = rankings[ind]
-                pct = r['分位数']
+        metric_display_map = {
+            'roe': '权益资本利润率ROE',
+            'operating_margin': '营业利润率',
+            'roa': '总资产利润率ROA',
+            'asset_turnover': '总资产周转率',
+            'current_ratio': '流动比率',
+            'debt_ratio': '总资产负债率',
+        }
+        for en_key, display_name in metric_display_map.items():
+            if en_key in rankings:
+                r = rankings[en_key]
+                pct = r['percentile']
                 if pct is not None and not pd.isna(pct):
                     if pct > 0.7:
-                        advantages.append(ind + " (分位数" + str(round(pct * 100, 1)) + "%)")
+                        advantages.append(display_name + " (分位数" + str(round(pct * 100, 1)) + "%)")
                     elif pct < 0.3:
-                        weaknesses.append(ind + " (分位数" + str(round(pct * 100, 1)) + "%)")
+                        weaknesses.append(display_name + " (分位数" + str(round(pct * 100, 1)) + "%)")
 
         radar_strong = []
         radar_weak = []
@@ -1536,17 +1558,25 @@ class FinancialAIReport:
         # 自动识别优势和短板
         advantages = []
         weaknesses = []
-        for ind in ['权益资本利润率ROE', '营业利润率', '总资产利润率ROA',
-                    '总资产周转率', '流动比率', '总资产负债率',
-                    '总资产创现率', '销售创现率']:
-            if ind in rankings:
-                r = rankings[ind]
-                pct = r['分位数']
+        metric_display_map = {
+            'roe': '权益资本利润率ROE',
+            'operating_margin': '营业利润率',
+            'roa': '总资产利润率ROA',
+            'asset_turnover': '总资产周转率',
+            'current_ratio': '流动比率',
+            'debt_ratio': '总资产负债率',
+            'cash_creation_total': '总资产创现率',
+            'cash_creation_sales': '销售创现率',
+        }
+        for en_key, display_name in metric_display_map.items():
+            if en_key in rankings:
+                r = rankings[en_key]
+                pct = r['percentile']
                 if pct is not None and not pd.isna(pct):
                     if pct > 0.7:
-                        advantages.append(ind + " (分位数" + str(round(pct * 100, 1)) + "%)")
+                        advantages.append(display_name + " (分位数" + str(round(pct * 100, 1)) + "%)")
                     elif pct < 0.3:
-                        weaknesses.append(ind + " (分位数" + str(round(pct * 100, 1)) + "%)")
+                        weaknesses.append(display_name + " (分位数" + str(round(pct * 100, 1)) + "%)")
 
         radar_strong = []
         radar_weak = []
@@ -1591,7 +1621,7 @@ class FinancialAIReport:
 
         prompt_lines = [
             "请基于以下公司财务数据，生成一段全面的管理建议AI解读。",
-            "严格要求：",
+            "严格要求："
             "直接输出最终分析内容，"
             "不要出现任何前言、身份说明或解释"
             "禁止使用以下表达："
@@ -1599,7 +1629,6 @@ class FinancialAIReport:
             "2. 根据您提供的信息……"
             "3. 我认为……"
             "4. 我将从……分析"
-            "5. 以下是分析……",
             "要求：",
             "1. 基于识别的优势和短板，给出3-5条具体、可操作的管理建议",
             "2. 建议分为：战略层面（长期方向）、运营层面（日常改进）、财务层面（资本结构优化）",
@@ -1626,22 +1655,21 @@ class FinancialAIReport:
         risks = []
         risk_details = []
 
-        for ind in ['总资产负债率', '流动比率']:
-            if ind in rankings:
-                r = rankings[ind]
-                pct = r['分位数']
+        # 英文 key -> (中文显示名, 风险判断逻辑, 风险标签)
+        risk_metrics = {
+            'debt_ratio': ('总资产负债率', lambda pct: pct > 0.7, '资产负债率偏高'),
+            'current_ratio': ('流动比率', lambda pct: pct < 0.3, '流动性不足'),
+        }
+        for en_key, (display_name, check_risk, risk_label) in risk_metrics.items():
+            if en_key in rankings:
+                r = rankings[en_key]
+                pct = r['percentile']
                 if pct is not None and not pd.isna(pct):
-                    if ind == '总资产负债率' and pct > 0.7:
-                        risks.append("资产负债率偏高 (分位数" + str(round(pct * 100, 1)) + "%)")
-                        rd = "资产负债率: 公司值" + str(round(r['公司值'], 4))
-                        rd += " | 行业中位数" + str(round(r['行业中位数'], 4) if r['行业中位数'] is not None else 'N/A')
-                        rd += " | 排名" + str(int(r['行业排名']) if r['行业排名'] is not None and not pd.isna(r['行业排名']) else 'N/A')
-                        risk_details.append(rd)
-                    elif ind == '流动比率' and pct < 0.3:
-                        risks.append("流动性不足 (分位数" + str(round(pct * 100, 1)) + "%)")
-                        rd = "流动比率: 公司值" + str(round(r['公司值'], 4))
-                        rd += " | 行业中位数" + str(round(r['行业中位数'], 4) if r['行业中位数'] is not None else 'N/A')
-                        rd += " | 排名" + str(int(r['行业排名']) if r['行业排名'] is not None and not pd.isna(r['行业排名']) else 'N/A')
+                    if check_risk(pct):
+                        risks.append(risk_label + " (分位数" + str(round(pct * 100, 1)) + "%)")
+                        rd = display_name + ": 公司值" + str(round(r['value'], 4))
+                        rd += " | 行业中位数" + str(round(r['median'], 4) if r['median'] is not None else 'N/A')
+                        rd += " | 排名" + str(int(r['rank']) if r['rank'] is not None and not pd.isna(r['rank']) else 'N/A')
                         risk_details.append(rd)
 
         # 雷达图弱项风险
@@ -1662,9 +1690,9 @@ class FinancialAIReport:
                     if change < -0.15:
                         trend_risks.append(dim + "能力持续恶化 (5年下降" + str(round(abs(change), 2)) + ")")
 
-        roe_pct = str(round(rankings.get('权益资本利润率ROE', {}).get('分位数', 0) * 100, 1)) if '权益资本利润率ROE' in rankings else 'N/A'
-        op_pct = str(round(rankings.get('营业利润率', {}).get('分位数', 0) * 100, 1)) if '营业利润率' in rankings else 'N/A'
-        debt_pct = str(round(rankings.get('总资产负债率', {}).get('分位数', 0) * 100, 1)) if '总资产负债率' in rankings else 'N/A'
+        roe_pct = str(round(rankings.get('roe', {}).get('percentile', 0) * 100, 1)) if 'roe' in rankings else 'N/A'
+        op_pct = str(round(rankings.get('operating_margin', {}).get('percentile', 0) * 100, 1)) if 'operating_margin' in rankings else 'N/A'
+        debt_pct = str(round(rankings.get('debt_ratio', {}).get('percentile', 0) * 100, 1)) if 'debt_ratio' in rankings else 'N/A' 
 
         data_lines = [
             "公司名称: " + company_name,

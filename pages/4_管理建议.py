@@ -82,7 +82,7 @@ with st.sidebar:
 
 # 如果还没有生成过，显示提示信息
 if not st.session_state.llm_suggestions:
-    st.info("👈 请点击侧边栏的「重新生成建议」按钮，获取AI生成的管理建议")
+    st.info("👈 请点击侧边栏的「生成建议」按钮，获取AI生成的管理建议")
     
     st.markdown("""
     ---

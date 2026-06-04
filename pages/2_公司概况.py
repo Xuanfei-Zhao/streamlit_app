@@ -119,10 +119,6 @@ if financial_rankings is not None:
         with col4:
             st.metric(label="百分位", value=f"{roe['percentile']*100:.1f}%")
 
-    with st.expander("🤖 AI解读：ROE排名"):
-        with st.spinner("AI 分析中..."):
-            reclass_text = service.analyze_roe_ranking(stock_code=company_code_norm)
-        st.markdown(reclass_text)
     
     with tab2:
         op_margin = financial_rankings['operating_margin']
@@ -139,11 +135,6 @@ if financial_rankings is not None:
         
         with col4:
             st.metric(label="百分位", value=f"{op_margin['percentile']*100:.1f}%")
-
-    with st.expander("🤖 AI解读：营业利润率排名"):
-        with st.spinner("AI 分析中..."):
-            reclass_text = service.analyze_operating_margin_ranking(stock_code=company_code_norm)
-        st.markdown(reclass_text)
     
     with tab3:
         roa = financial_rankings['roa']
@@ -161,12 +152,6 @@ if financial_rankings is not None:
         with col4:
             st.metric(label="百分位", value=f"{roa['percentile']*100:.1f}%")
     
-
-
-    with st.expander("🤖 AI解读：ROA排名"):
-        with st.spinner("AI 分析中..."):
-            reclass_text = service.analyze_roa_ranking(stock_code=company_code_norm)
-        st.markdown(reclass_text)
 
 
     st.subheader("详细排名数据")
@@ -220,10 +205,6 @@ if financial_rankings is not None:
     
     st.dataframe(ranking_data, use_container_width=True, hide_index=True)
 
-    with st.expander("🤖 AI解读：详细排名总览"):
-        with st.spinner("AI 分析中..."):
-            reclass_text = service.analyze_financial_rankings_overview(stock_code=company_code_norm)
-        st.markdown(reclass_text)
 else:
     st.warning("无法获取财务排名数据")
 

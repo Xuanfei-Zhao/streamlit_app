@@ -459,10 +459,6 @@ except FileNotFoundError:
 except Exception as e:
     st.info(f"无法加载各维度得分数据（{e}），将跳过趋势对比")
 
-with st.expander("🤖 AI解读：维度得分趋势对比"):
-    with st.spinner("AI 分析中..."):
-        reclass_text = service.analyze_dimension_trend(stock_code=company_code_norm)
-    st.markdown(reclass_text)
 
 st.markdown("---")
 

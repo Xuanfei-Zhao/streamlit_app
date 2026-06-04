@@ -230,14 +230,14 @@ def load_company_statistics():
 @st.cache_data
 def load_radar_data():
     """加载综合维度雷达图数据"""
-    with open('radars_data.json', 'r', encoding='utf-8') as f:
+    with open('公司综合维度雷达图数据（可直接用于streamlit）.json', 'r', encoding='utf-8') as f:
         data = json.load(f)
     return data
 
 @st.cache_data
 def load_indicator_radar_data():
     """加载指标级雷达图数据"""
-    with open('indicator_radars_data.json', 'r', encoding='utf-8') as f:
+    with open('公司各维度雷达图数据（可直接用于streamlit）.json', 'r', encoding='utf-8') as f:
         data = json.load(f)
     return data
 
