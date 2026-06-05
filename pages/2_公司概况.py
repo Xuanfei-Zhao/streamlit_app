@@ -20,8 +20,9 @@ from utils.data_loader import (
 from utils.charts import create_radar_chart, create_line_chart
 
 st.set_page_config(page_title="公司概况", page_icon="🏢", layout="wide")
-
 company_code_norm = str(st.session_state.get("selected_company", "")).strip().zfill(6)
+stock_code = st.session_state.selected_company
+
 
 if 'selected_company' not in st.session_state:
     st.warning("⚠️ 请先在侧边栏选择一家公司")
@@ -119,6 +120,12 @@ if financial_rankings is not None:
         with col4:
             st.metric(label="百分位", value=f"{roe['percentile']*100:.1f}%")
 
+        # ... 原有ROE展示代码 ...
+        st.markdown("---")
+        st.markdown("**🤖 AI解读**")
+        ai_text = service.analyze_roe_ranking(stock_code)
+        st.markdown(ai_text)
+
     
     with tab2:
         op_margin = financial_rankings['operating_margin']
@@ -135,6 +142,12 @@ if financial_rankings is not None:
         
         with col4:
             st.metric(label="百分位", value=f"{op_margin['percentile']*100:.1f}%")
+       
+    # ... 原有利润率展示代码 ...
+        st.markdown("---")
+        st.markdown("**🤖 AI解读**")
+        ai_text = service.analyze_operating_margin_ranking(stock_code)
+        st.markdown(ai_text)
     
     with tab3:
         roa = financial_rankings['roa']
@@ -151,6 +164,12 @@ if financial_rankings is not None:
         
         with col4:
             st.metric(label="百分位", value=f"{roa['percentile']*100:.1f}%")
+
+        # ... 原有ROA展示代码 ...
+        st.markdown("---")
+        st.markdown("**🤖 AI解读**")
+        ai_text = service.analyze_roa_ranking(stock_code)
+        st.markdown(ai_text)
     
 
 
@@ -207,6 +226,11 @@ if financial_rankings is not None:
 
 else:
     st.warning("无法获取财务排名数据")
+
+st.markdown("---")
+st.markdown("**🤖 AI总览解读**")
+ai_text = service.analyze_financial_rankings_overview(stock_code)
+st.markdown(ai_text)
 
 
    

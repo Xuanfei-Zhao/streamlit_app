@@ -11,6 +11,7 @@ st.set_page_config(page_title="财务分析", layout="wide")
 st.title("📊 财务分析")
 
 company_code_norm = str(st.session_state.get("selected_company", "")).strip().zfill(6)
+stock_code = st.session_state.selected_company
 
 # ---------- 辅助函数：标准化公司代码（去除 .0，补零到6位）----------
 def normalize_code(code):
@@ -461,6 +462,9 @@ except Exception as e:
 
 
 st.markdown("---")
+st.markdown("**🤖 AI趋势解读**")
+ai_text = service.analyze_dimension_trend(stock_code)
+st.markdown(ai_text)
 
 # 5. 年度趋势折线图（基于 financial_with_classification.csv）
 yearly_df = load_yearly_financial()
@@ -585,17 +589,17 @@ for dim, dim_info in dimensions_data.items():
 
         # 根据维度名称调用对应的分析函数
         if '盈利' in dim:
-            ai_text = service.analyze_profitability(company_code_norm)
+            ai_text = service.analyze_profitability(stock_code)
         elif '资产' in dim or '效率' in dim or '周转' in dim:
-            ai_text = service.analyze_asset_efficiency(company_code_norm)
+            ai_text = service.analyze_asset_efficiency(stock_code)
         elif '流动' in dim:
-            ai_text = service.analyze_liquidity(company_code_norm)
+            ai_text = service.analyze_liquidity(stock_code)
         elif '现金' in dim or '创现' in dim:
-            ai_text = service.analyze_cash_creation(company_code_norm)
+            ai_text = service.analyze_cash_creation(stock_code)
         elif '偿债' in dim or '负债' in dim:
-            ai_text = service.analyze_solvency(company_code_norm)
+            ai_text = service.analyze_solvency(stock_code)
         elif '股东' in dim or '收益' in dim:
-            ai_text = service.analyze_shareholder_return(company_code_norm)
+            ai_text = service.analyze_shareholder_return(stock_code)
         else:
             ai_text = "该维度暂无AI解读"
 

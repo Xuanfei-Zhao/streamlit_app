@@ -7,13 +7,14 @@ from typing import Dict, Any, Optional, List
 from pathlib import Path
 import warnings
 import re
+from difflib import get_close_matches
 warnings.filterwarnings('ignore')
 
 
 class FinancialAIReport:
     """财务分析AI报告生成器 - 基于前端展示内容，为每个图表模块提供深度AI解读"""
 
-    def __init__(self, api_key: str = "sk-72aef1acb8e342748533da787a6d6c59", model: str = "qwen-turbo"):
+    def __init__(self, api_key: str = "sk-0d7e63627bd044e59e984e7062519a0c", model: str = "qwen-turbo"):
         self.api_key = api_key
         self.model = model
         self.api_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
@@ -40,18 +41,15 @@ class FinancialAIReport:
     def _load_all_data(self):
         print("[后端] 正在加载数据文件...")
 
+        # ===== 1. 公司列表 & 行业映射 =====
         try:
             df = pd.read_excel('complete_company_industry_mapping_v5_qwen_level1_final.xlsx', engine="openpyxl")        
-        
-        # ----- 1. 查找股票代码列 -----
             code_col = None
-        # 常见列名列表
             candidates = ['stock_code', 'stock_code_norm', 'symbol', 'code', '证券代码']
             for col in candidates:
                 if col in df.columns:
                     code_col = col
                     break
-        # 若仍未找到，模糊匹配包含 'code' 的列
             if code_col is None:
                 for col in df.columns:
                     if 'code' in col.lower():
@@ -60,10 +58,8 @@ class FinancialAIReport:
             if code_col is None:
                 raise KeyError(f"未找到股票代码列，可用列: {df.columns.tolist()}")
         
-        # ----- 2. 标准化股票代码 -----
             df['symbol'] = df[code_col].apply(self._normalize_code)
         
-        # ----- 3. 查找公司名称列 -----
             name_col = None
             name_candidates = ['company_name', 'stock_name', 'name', '公司名称']
             for col in name_candidates:
@@ -71,7 +67,6 @@ class FinancialAIReport:
                     name_col = col
                     break
             if name_col is None:
-            # 模糊匹配
                 for col in df.columns:
                     if 'name' in col.lower() or '公司' in col:
                         name_col = col
@@ -81,39 +76,32 @@ class FinancialAIReport:
             else:
                 df['name'] = '未知'
         
-        # ----- 4. 保留所有列（不要选择子集），供后续行业分类使用 -----
             self._stock_list = df
-            self._industry_mapping = df  # 行业映射复用同一份数据
+            self._industry_mapping = df
             print(f"  公司列表: {len(df)} 家公司")
         except Exception as e:
             print(f"  数据加载失败: {e}")
             self._stock_list = pd.DataFrame()
             self._industry_mapping = pd.DataFrame()
 
-        # ===== 更新：新数据源 company_statistics_with_raw_median_percentile_rank-1.csv =====
+        # ===== 2. 财务指标数据（保留原始多行，不去重）=====
         try:
             df = pd.read_csv('company_statistics_with_raw_median_percentile_rank-1.csv', encoding='utf-8', low_memory=False)
-            code_col = None
-            for col in df.columns:
-                if col == 'stock_code_norm' or '公司代码' in col or 'code' in col.lower():
-                    code_col = col
-                    break
-            if code_col:
-                df[code_col] = df[code_col].astype(str).apply(self._normalize_code)
-                df.rename(columns={code_col: 'stock_code'}, inplace=True)
-            # 去重：取最新一期数据
-            if 'accper' in df.columns:
-                df['accper_num'] = pd.to_numeric(df['accper'], errors='coerce')
-                df = df.sort_values(['stock_code', 'accper_num'], ascending=[True, False])
-                df = df.drop_duplicates(subset=['stock_code'], keep='first')
-                df.drop(columns=['accper_num'], inplace=True)
+            if 'stock_code_norm' in df.columns:
+                df['stock_code_norm'] = df['stock_code_norm'].astype(str).str.replace(r'\.0$', '', regex=True).str.zfill(6)
+            # 转换数值列
+            numeric_cols = [col for col in df.columns if any(x in col for x in ['_raw_value', '_raw_median', '_percentile', '_rank'])]
+            for col in numeric_cols:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
             self._financial_data = df
-            print(f"  财务指标数据(新数据源): {len(df)} 条记录")
+            self._benchmark_data = df  # 复用同一份数据
+            print(f"  财务指标数据: {len(df)} 条记录")
         except Exception as e:
             print(f"  财务指标加载失败: {e}")
+            self._financial_data = pd.DataFrame()
+            self._benchmark_data = pd.DataFrame()
 
-
-
+        # ===== 3. 维度雷达图 JSON =====
         try:
             with open('公司各维度雷达图数据（可直接用于streamlit）.json', 'r', encoding='utf-8') as f:
                 self._dimension_json = json.load(f)
@@ -121,6 +109,7 @@ class FinancialAIReport:
         except Exception as e:
             print(f"  维度雷达图加载失败: {e}")
 
+        # ===== 4. 综合雷达图 JSON =====
         try:
             with open('公司综合维度雷达图数据（可直接用于streamlit）.json', 'r', encoding='utf-8') as f:
                 self._comprehensive_json = json.load(f)
@@ -128,22 +117,17 @@ class FinancialAIReport:
         except Exception as e:
             print(f"  综合雷达图加载失败: {e}")
 
-        # ===== 新增：公司各纬度得分.csv =====
+        # ===== 5. 各维度得分 CSV（多行格式：每年一行）=====
         try:
             df = pd.read_csv('公司各纬度得分.csv', encoding='utf-8')
-            code_col = None
-            for col in df.columns:
-                if 'code' in col.lower() or '代码' in col:
-                    code_col = col
-                    break
-            if code_col:
-                df[code_col] = df[code_col].astype(str).apply(self._normalize_code)
+            if 'stock_code_norm' in df.columns:
+                df['stock_code_norm'] = df['stock_code_norm'].astype(str).str.replace(r'\.0$', '', regex=True).str.zfill(6)
             self._dimension_scores = df
             print(f"  各维度得分数据: {len(df)} 条记录")
         except Exception as e:
             print(f"  各维度得分加载失败: {e}")
 
-        # ===== 新增：financial_with_classification.csv（年度财务数据）=====
+        # ===== 6. 年度财务数据 =====
         try:
             df = pd.read_csv('financial_with_classification.csv', encoding='utf-8')
             code_col = None
@@ -152,8 +136,7 @@ class FinancialAIReport:
                     code_col = col
                     break
             if code_col:
-                df[code_col] = df[code_col].astype(str).apply(self._normalize_code)
-            # 提取年份
+                df[code_col] = df[code_col].astype(str).str.replace(r'\.0$', '', regex=True).str.zfill(6)
             if 'accper' in df.columns:
                 def extract_year(val):
                     if pd.isna(val):
@@ -174,22 +157,7 @@ class FinancialAIReport:
         except Exception as e:
             print(f"  年度财务数据加载失败: {e}")
 
-        # ===== 更新：行业基准数据改为新数据源 =====
-        try:
-            df = pd.read_csv('company_statistics_with_raw_median_percentile_rank-1.csv', encoding='utf-8', low_memory=False)
-            code_col = None
-            for col in df.columns:
-                if col == 'stock_code_norm' or '公司代码' in col or 'code' in col.lower():
-                    code_col = col
-                    break
-            if code_col:
-                df[code_col] = df[code_col].astype(str).apply(self._normalize_code)
-                df.rename(columns={code_col: 'company_code'}, inplace=True)
-            self._benchmark_data = df
-            print(f"  行业基准数据(新数据源): {len(df)} 条记录")
-        except Exception as e:
-            print(f"  行业基准加载失败: {e}")
-
+        # ===== 7. 跨行业数据 =====
         try:
             df = pd.read_excel('stage17_final_cross_industry_mapping_table.xlsx', engine="openpyxl")
             if 'stock_code_norm' in df.columns:
@@ -201,6 +169,7 @@ class FinancialAIReport:
         except Exception as e:
             print(f"  跨行业数据加载失败: {e}")
 
+        # ===== 8. 行业关键词 =====
         try:
             df = pd.read_csv('step5_industry_top10_keywords_wide_all.csv', encoding='utf-8')
             if 'industry_label' in df.columns and 'industry' not in df.columns:
@@ -272,157 +241,278 @@ class FinancialAIReport:
 
     # ==================== 数据获取函数（与前端展示对应）====================
 
-    def get_financial_rankings(self, stock_code: str) -> Dict[str, Any]:
-        """获取财务指标排名数据（对应2_公司概况.py的财务排名）"""
+    def get_financial_rankings(self, stock_code: str, year: int = None) -> Dict[str, Any]:
+        """获取财务指标排名数据 - 与前端 get_company_financial_rankings 完全一致"""
         code = self._normalize_code(stock_code)
-        rankings = {}
-
-        # ===== 与前端 data_loader.py 的 get_company_financial_rankings 保持一致 =====
-        # 前端使用英文 key，列名后缀为 _value / _median / _percentile / _rank
-        if self._benchmark_data is not None:
-            company_data = self._benchmark_data[self._benchmark_data['company_code'] == code]
-            if not company_data.empty:
-                # 指标映射：英文 key -> 中文列名前缀
-                indicator_map = {
-                    'roe': '权益资本利润率ROE',
-                    'operating_margin': '营业利润率',
-                    'roa': '总资产利润率ROA',
-                    'ebitda_margin': 'EBITDA利润率',
-                    'asset_turnover': '总资产周转率',
-                    'current_ratio': '流动比率',
-                    'debt_ratio': '总资产负债率',
-                    'inventory_turnover': '存货周转率',
-                    'cash_creation_total': '总资产创现率',
-                    'cash_creation_sales': '销售创现率',
-                }
-
-                for en_key, cn_prefix in indicator_map.items():
-                    vcol = cn_prefix + '_value'
-                    median_col = cn_prefix + '_median'
-                    percentile_col = cn_prefix + '_percentile'
-                    rank_col = cn_prefix + '_rank'
-
-                    if vcol in company_data.columns:
-                        rankings[en_key] = {
-                            'value': company_data[vcol].values[0],
-                            'median': company_data[median_col].values[0] if median_col in company_data.columns else None,
-                            'percentile': company_data[percentile_col].values[0] if percentile_col in company_data.columns else None,
-                            'rank': company_data[rank_col].values[0] if rank_col in company_data.columns else None
-                        }
-
+        
+        if self._financial_data is None or self._financial_data.empty:
+            return {}
+        
+        stats_df = self._financial_data
+        filtered = stats_df[stats_df['stock_code_norm'].astype(str).str.zfill(6) == code]
+        
+        if filtered.empty:
+            return {}
+        
+        if year is not None:
+            filtered = filtered[filtered['accper'] == year]
+        
+        if filtered.empty:
+            # 取最新年份
+            filtered = stats_df[stats_df['stock_code_norm'].astype(str).str.zfill(6) == code]
+            filtered = filtered.sort_values('accper', ascending=False).head(1)
+        
+        if filtered.empty:
+            return {}
+        
+        row = filtered.iloc[0]
+        
+        def safe_float(val):
+            try:
+                if pd.isna(val) or val in ('', 'N/A', 'None', 'null'):
+                    return None
+                return float(val)
+            except (ValueError, TypeError):
+                return None
+        
+        def safe_int(val):
+            f = safe_float(val)
+            return int(f) if f is not None else None
+        
+        # 与前端 data_loader.py 列名完全一致
+        rankings = {
+            'roe': {
+                'value': safe_float(row.get('权益资本利润率ROE_raw_value')),
+                'median': safe_float(row.get('权益资本利润率ROE_raw_median')),
+                'percentile': safe_float(row.get('权益资本利润率ROE_percentile')),
+                'rank': safe_int(row.get('权益资本利润率ROE_rank'))
+            },
+            'operating_margin': {
+                'value': safe_float(row.get('营业利润率_raw_value')),
+                'median': safe_float(row.get('营业利润率_raw_median')),
+                'percentile': safe_float(row.get('营业利润率_percentile')),
+                'rank': safe_int(row.get('营业利润率_rank'))
+            },
+            'roa': {
+                'value': safe_float(row.get('总资产利润率ROA_raw_value')),
+                'median': safe_float(row.get('总资产利润率ROA_raw_median')),
+                'percentile': safe_float(row.get('总资产利润率ROA_percentile')),
+                'rank': safe_int(row.get('总资产利润率ROA_rank'))
+            },
+            'ebitda_margin': {
+                'value': safe_float(row.get('EBITDA利润率_raw_value')),
+                'median': safe_float(row.get('EBITDA利润率_raw_median')),
+                'percentile': safe_float(row.get('EBITDA利润率_percentile')),
+                'rank': safe_int(row.get('EBITDA利润率_rank'))
+            },
+            'asset_turnover': {
+                'value': safe_float(row.get('总资产周转率_raw_value')),
+                'median': safe_float(row.get('总资产周转率_raw_median')),
+                'percentile': safe_float(row.get('总资产周转率_percentile')),
+                'rank': safe_int(row.get('总资产周转率_rank'))
+            },
+            'current_ratio': {
+                'value': safe_float(row.get('流动比率_raw_value')),
+                'median': safe_float(row.get('流动比率_raw_median')),
+                'percentile': safe_float(row.get('流动比率_percentile')),
+                'rank': safe_int(row.get('流动比率_rank'))
+            },
+            'debt_ratio': {
+                'value': safe_float(row.get('资产负债率_raw_value')),
+                'median': safe_float(row.get('资产负债率_raw_median')),
+                'percentile': safe_float(row.get('资产负债率_percentile')),
+                'rank': safe_int(row.get('资产负债率_rank'))
+            }
+        }
         return rankings
 
     def get_radar_data(self, stock_code: str) -> Dict[str, Any]:
-        """获取雷达图数据（综合维度 + 指标维度）"""
+        """获取雷达图数据 - 与前端 get_company_radar_data / get_company_indicator_radar_data 一致"""
         code = self._normalize_code(stock_code)
         radar = {'综合维度': {}, '指标维度': {}}
-
+        
+        stock_code_str = code
+        try:
+            stock_code_int = str(int(float(stock_code_str)))
+        except:
+            stock_code_int = stock_code_str
+        
+        # ----- 综合维度 -----
         if self._comprehensive_json:
-            for key, data in self._comprehensive_json.items():
-                if code in key:
-                    radar['综合维度'] = {
-                        'dimensions': data.get('dimensions', []),
-                        'scores': data.get('scores', [])
-                    }
+            matched_key = None
+            for key in self._comprehensive_json.keys():
+                if key.endswith(f'_{stock_code_str}') or key.endswith(f'_{stock_code_str}.0') or \
+                   key.endswith(f'_{stock_code_int}') or key.endswith(f'_{stock_code_int}.0'):
+                    matched_key = key
                     break
-
+                data_stock_code = self._comprehensive_json[key].get('stock_code', '')
+                if str(data_stock_code) == stock_code_str or str(data_stock_code) == stock_code_int:
+                    matched_key = key
+                    break
+                try:
+                    data_stock_code_int = str(int(float(str(data_stock_code))))
+                    if data_stock_code_int == stock_code_int:
+                        matched_key = key
+                        break
+                except:
+                    pass
+            
+            if matched_key:
+                data = self._comprehensive_json[matched_key]
+                radar['综合维度'] = {
+                    'dimensions': data.get('dimensions', []),
+                    'scores': data.get('scores', [])
+                }
+            else:
+                print(f"[警告] 综合雷达图未找到公司 {code}")
+        
+        # ----- 指标维度 -----
         if self._dimension_json:
-            for key, data in self._dimension_json.items():
-                if code in key:
-                    indicators = {}
-                    for dim_key, dim_val in data.items():
-                        if isinstance(dim_val, dict) and 'indicators' in dim_val:
-                            dim_name = dim_val.get('dimension_name', dim_key.replace('_score', ''))
-                            indicators[dim_name] = {
-                                'indicators': dim_val.get('indicators', []),
-                                'scores': dim_val.get('scores', [])
-                            }
-                    radar['指标维度'] = indicators
+            matched_key = None
+            for key in self._dimension_json.keys():
+                if key.endswith(f'_{stock_code_str}') or key.endswith(f'_{stock_code_str}.0') or \
+                   key.endswith(f'_{stock_code_int}') or key.endswith(f'_{stock_code_int}.0'):
+                    matched_key = key
                     break
-
+            
+            if matched_key:
+                data = self._dimension_json[matched_key]
+                indicators = {}
+                for dim_key, dim_val in data.items():
+                    if isinstance(dim_val, dict) and 'indicators' in dim_val:
+                        dim_name = dim_val.get('dimension_name', dim_key.replace('_score', ''))
+                        indicators[dim_name] = {
+                            'indicators': dim_val.get('indicators', []),
+                            'scores': dim_val.get('scores', [])
+                        }
+                radar['指标维度'] = indicators
+            else:
+                print(f"[警告] 维度雷达图未找到公司 {code}")
+        
         return radar
 
     def get_dimension_trend(self, stock_code: str) -> Dict[str, Any]:
-        """获取各维度五年趋势数据（对应3_财务分析.py的趋势对比）"""
+        """获取各维度五年趋势数据 - 与前端条形图逻辑一致（多行格式）"""
         code = self._normalize_code(stock_code)
         trend = {}
-
-        # ===== 更新：使用 公司各纬度得分.csv 替代 公司五年数据趋势分析.csv =====
-        if self._dimension_scores is not None:
-            code_col = None
-            for col in self._dimension_scores.columns:
-                if 'code' in col.lower() or '代码' in col:
-                    code_col = col
-                    break
-            if code_col:
-                matched = self._dimension_scores[self._dimension_scores[code_col] == code]
-                if not matched.empty:
-                    row = matched.iloc[0]
-                    dim_scores = {}
-                    # 查找 _score 结尾的列（不包括 composite_score）
-                    score_cols = [c for c in self._dimension_scores.columns 
-                                  if c.endswith('_score') and c != 'composite_score']
-                    for col in score_cols:
-                        dim_name = col.replace('_score', '')
-                        # 尝试找对应的 2024 和 5年均值列
-                        col_2024 = col + '_2024'
-                        col_5y = col + '_5y_mean'
-                        val_2024 = row.get(col_2024, None) if col_2024 in self._dimension_scores.columns else None
-                        val_5y = row.get(col_5y, None) if col_5y in self._dimension_scores.columns else None
-                        # 如果找不到，直接用当前列的值
-                        if val_2024 is None:
-                            val_2024 = row.get(col, None)
-                        dim_scores[dim_name] = {
-                            '2024': val_2024,
-                            '5年均值': val_5y
-                        }
-                    trend['维度趋势'] = dim_scores
-
+        
+        if self._dimension_scores is None or self._dimension_scores.empty:
+            return trend
+        
+        score_df = self._dimension_scores
+        company_scores = score_df[score_df['stock_code_norm'].astype(str).str.zfill(6) == code]
+        
+        if company_scores.empty:
+            print(f"[警告] 维度得分表未找到公司 {code}")
+            return trend
+        
+        # 查找 _score 列（排除 composite_score）
+        dim_score_cols = [col for col in company_scores.columns 
+                          if col.endswith('_score') and col != 'composite_score']
+        
+        dim_scores = {}
+        for col in dim_score_cols:
+            dim_name = col.replace('_score', '')
+            
+            # 2024年数据
+            data_2024 = company_scores[company_scores['year'] == 2024]
+            val_2024 = data_2024[col].iloc[0] if not data_2024.empty else None
+            
+            # 5年均值 (2020-2024)
+            years = [2020, 2021, 2022, 2023, 2024]
+            data_5y = company_scores[company_scores['year'].isin(years)]
+            val_5y = data_5y[col].mean() if not data_5y.empty else None
+            
+            if val_2024 is not None or val_5y is not None:
+                dim_scores[dim_name] = {
+                    '2024': val_2024,
+                    '5年均值': val_5y
+                }
+        
+        if dim_scores:
+            trend['维度趋势'] = dim_scores
+        
         return trend
 
     def get_dimension_detail(self, stock_code: str) -> Dict[str, Any]:
-        """获取各能力维度的详细数据（含指标级对比，对应3_财务分析.py的折叠卡片）"""
+        """获取各能力维度的详细数据 - 与前端 load_raw_financial_indicators 一致"""
         code = self._normalize_code(stock_code)
         detail = {}
-
-        # 从JSON获取维度指标和得分
+        
+        # 1. 从JSON获取维度指标列表和归一化得分
         if self._dimension_json:
-            for key, data in self._dimension_json.items():
-                if code in key:
-                    for dim_key, dim_val in data.items():
-                        if isinstance(dim_val, dict) and 'indicators' in dim_val:
-                            dim_name = dim_val.get('dimension_name', dim_key.replace('_score', ''))
-                            detail[dim_name] = {
-                                'indicators': dim_val.get('indicators', []),
-                                'scores': dim_val.get('scores', [])
-                            }
+            stock_code_str = code
+            try:
+                stock_code_int = str(int(float(stock_code_str)))
+            except:
+                stock_code_int = stock_code_str
+            
+            matched_key = None
+            for key in self._dimension_json.keys():
+                if key.endswith(f'_{stock_code_str}') or key.endswith(f'_{stock_code_str}.0') or \
+                   key.endswith(f'_{stock_code_int}') or key.endswith(f'_{stock_code_int}.0'):
+                    matched_key = key
                     break
-
-        # 合并行业基准数据（与前端 data_loader.py 的列名后缀保持一致：_value / _median / _percentile / _rank）
-        if self._benchmark_data is not None:
-            company_data = self._benchmark_data[self._benchmark_data['company_code'] == code]
+            
+            if matched_key:
+                data = self._dimension_json[matched_key]
+                for dim_key, dim_val in data.items():
+                    if isinstance(dim_val, dict) and 'indicators' in dim_val:
+                        dim_name = dim_val.get('dimension_name', dim_key.replace('_score', ''))
+                        detail[dim_name] = {
+                            'indicators': dim_val.get('indicators', []),
+                            'scores': dim_val.get('scores', [])  # 归一化得分 0-1
+                        }
+        
+        if not detail:
+            return detail
+        
+        # 2. 从CSV获取原始值和行业对比数据（宽表→长表逻辑）
+        if self._benchmark_data is not None and not self._benchmark_data.empty:
+            company_data = self._benchmark_data[self._benchmark_data['stock_code_norm'].astype(str).str.zfill(6) == code]
             if not company_data.empty:
+                # 取最新期
+                if 'accper' in company_data.columns:
+                    company_data = company_data.sort_values('accper', ascending=False).head(1)
+                row = company_data.iloc[0]
+                
                 for dim_name, dim_info in detail.items():
                     indicators = dim_info['indicators']
+                    company_vals = []
                     industry_medians = []
                     percentiles = []
                     ranks = []
+                    
                     for ind in indicators:
-                        # 与前端 data_loader.py 的列名后缀一致
-                        vcol = ind + '_value'
-                        mcol = ind + '_median'
+                        # 直接匹配列名
+                        vcol = ind + '_raw_value'
+                        mcol = ind + '_raw_median'
                         pcol = ind + '_percentile'
                         rcol = ind + '_rank'
-                        industry_medians.append(company_data[mcol].values[0] if mcol in company_data.columns else None)
-                        percentiles.append(company_data[pcol].values[0] if pcol in company_data.columns else None)
-                        ranks.append(company_data[rcol].values[0] if rcol in company_data.columns else None)
+                        
+                        # 如果直接匹配失败，尝试模糊匹配（与前端一致）
+                        if vcol not in row.index:
+                            all_cols = [c for c in row.index if c.endswith('_raw_value')]
+                            matches = get_close_matches(ind, [c[:-10] for c in all_cols], n=1, cutoff=0.7)
+                            if matches:
+                                base = matches[0]
+                                vcol = base + '_raw_value'
+                                mcol = base + '_raw_median'
+                                pcol = base + '_percentile'
+                                rcol = base + '_rank'
+                        
+                        company_vals.append(row.get(vcol) if vcol in row.index else None)
+                        industry_medians.append(row.get(mcol) if mcol in row.index else None)
+                        percentiles.append(row.get(pcol) if pcol in row.index else None)
+                        ranks.append(row.get(rcol) if rcol in row.index else None)
+                    
+                    detail[dim_name]['company_values'] = company_vals
                     detail[dim_name]['industry_medians'] = industry_medians
                     detail[dim_name]['percentiles'] = percentiles
                     detail[dim_name]['ranks'] = ranks
-
+        
         return detail
 
-    # ===== 新增：获取年度趋势数据（对应3_财务分析.py的折线图）=====
     def get_yearly_trend(self, stock_code: str, indicator: str) -> pd.DataFrame:
         """获取指定指标的年度趋势数据"""
         code = self._normalize_code(stock_code)
@@ -489,7 +579,7 @@ class FinancialAIReport:
     # ---------- 1. 行业分类页 ----------
 
     def analyze_company_overview(self, stock_code: str) -> str:
-        """模块1：公司概况AI解读（对应1_行业分类.py顶部公司信息）"""
+        """模块1：公司概况AI解读"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         industry_info = self.get_industry_info(code)
@@ -530,7 +620,7 @@ class FinancialAIReport:
         return self.call_qwen(prompt, max_tokens=2000, temperature=0.3)
 
     def analyze_industry_reclassification(self, stock_code: str) -> str:
-        """模块2：行业重分类AI解读（对应1_行业分类.py行业身份卡）"""
+        """模块2：行业重分类AI解读"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         industry_info = self.get_industry_info(code)
@@ -581,7 +671,7 @@ class FinancialAIReport:
         return self.call_qwen(prompt, max_tokens=2000, temperature=0.3)
 
     def analyze_industry_keywords(self, stock_code: str) -> str:
-        """模块3：行业关键词AI解读（对应1_行业分类.py行业TOP10关键词）"""
+        """模块3：行业关键词AI解读"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         industry_info = self.get_industry_info(code)
@@ -630,7 +720,7 @@ class FinancialAIReport:
         return self.call_qwen(prompt, max_tokens=2000, temperature=0.3)
 
     def analyze_similar_companies(self, stock_code: str) -> str:
-        """模块4：同行业相似公司AI解读（对应1_行业分类.py相似公司TOP10）"""
+        """模块4：同行业相似公司AI解读"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         similar = self.get_similar_companies(code, top_n=10)
@@ -675,13 +765,13 @@ class FinancialAIReport:
 
         return self.call_qwen(prompt, max_tokens=2000, temperature=0.3)
 
-    # ---------- 2. 公司概况页 - 行业内关键指标排名（三方面+总览） ----------
+    # ---------- 2. 公司概况页 - 行业内关键指标排名 ----------
 
     def analyze_roe_ranking(self, stock_code: str) -> str:
-        """模块5a：ROE排名AI解读（对应2_公司概况.py Tab1）"""
+        """模块5a：ROE排名AI解读"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
-        rankings = self.get_financial_rankings(code)
+        rankings = self.get_financial_rankings(code, year=2024)
 
         roe_data = rankings.get('roe', {})
         if not roe_data or roe_data.get('value') is None:
@@ -727,10 +817,10 @@ class FinancialAIReport:
         return self.call_qwen(prompt, max_tokens=2000, temperature=0.3)
 
     def analyze_operating_margin_ranking(self, stock_code: str) -> str:
-        """模块5b：营业利润率排名AI解读（对应2_公司概况.py Tab2）"""
+        """模块5b：营业利润率排名AI解读"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
-        rankings = self.get_financial_rankings(code)
+        rankings = self.get_financial_rankings(code, year=2024)
 
         margin_data = rankings.get('operating_margin', {})
         if not margin_data or margin_data.get('value') is None:
@@ -776,10 +866,10 @@ class FinancialAIReport:
         return self.call_qwen(prompt, max_tokens=2000, temperature=0.3)
 
     def analyze_roa_ranking(self, stock_code: str) -> str:
-        """模块5c：总资产利润率排名AI解读（对应2_公司概况.py Tab3）"""
+        """模块5c：总资产利润率排名AI解读"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
-        rankings = self.get_financial_rankings(code)
+        rankings = self.get_financial_rankings(code, year=2024)
 
         roa_data = rankings.get('roa', {})
         if not roa_data or roa_data.get('value') is None:
@@ -825,20 +915,19 @@ class FinancialAIReport:
         return self.call_qwen(prompt, max_tokens=2000, temperature=0.3)
 
     def analyze_financial_rankings_overview(self, stock_code: str) -> str:
-        """模块5d：财务指标排名总览AI解读（对应2_公司概况.py详细排名数据表）"""
+        """模块5d：财务指标排名总览AI解读"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
-        rankings = self.get_financial_rankings(code)
+        rankings = self.get_financial_rankings(code, year=2024)
 
         rankings_lines = []
-        # 英文 key -> 中文显示名 映射
         metric_display_map = {
             'roe': '权益资本利润率ROE',
             'operating_margin': '营业利润率',
             'roa': '总资产利润率ROA',
             'asset_turnover': '总资产周转率',
             'current_ratio': '流动比率',
-            'debt_ratio': '总资产负债率',
+            'debt_ratio': '资产负债率',
             'cash_creation_total': '总资产创现率',
             'cash_creation_sales': '销售创现率',
             'ebitda_margin': 'EBITDA利润率',
@@ -853,8 +942,8 @@ class FinancialAIReport:
                 if val is not None and not pd.isna(val):
                     pct_str = str(round(pct * 100, 1)) + "%" if pct is not None and not pd.isna(pct) else "N/A"
                     rank_str = str(int(rank)) if rank is not None and not pd.isna(rank) else "N/A"
-                    vs_median = "高于" if val > median else "低于"
-                    line = display_name + ": 公司值" + str(round(val, 4)) + " | 行业中位数" + str(round(median, 4) if median is not None else 'N/A') + " | " + vs_median + "中位数 | 分位数" + pct_str + " | 排名" + rank_str
+                    vs_median = "高于" if median is not None and val > median else "低于" if median is not None else "无法对比"
+                    line = display_name + ": 公司值" + (str(round(val, 4)) if val is not None else 'N/A') + " | 行业中位数" + (str(round(median, 4)) if median is not None else 'N/A') + " | " + vs_median + "中位数 | 分位数" + pct_str + " | 排名" + rank_str
                     rankings_lines.append(line)
 
         if not rankings_lines:
@@ -893,10 +982,10 @@ class FinancialAIReport:
 
         return self.call_qwen(prompt, max_tokens=3000, temperature=0.3)
 
-    # ---------- 3. 公司概况页 - 雷达图（综合维度 + 指标级） ----------
+    # ---------- 3. 公司概况页 - 雷达图 ----------
 
     def analyze_comprehensive_radar(self, stock_code: str) -> str:
-        """模块6a：综合维度雷达图AI解读（对应2_公司概况.py Tab1）"""
+        """模块6a：综合维度雷达图AI解读"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         radar = self.get_radar_data(code)
@@ -942,7 +1031,7 @@ class FinancialAIReport:
         return self.call_qwen(prompt, max_tokens=2000, temperature=0.3)
 
     def analyze_indicator_radar(self, stock_code: str) -> str:
-        """模块6b：指标级雷达图AI解读（对应2_公司概况.py Tab2）"""
+        """模块6b：指标级雷达图AI解读"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         radar = self.get_radar_data(code)
@@ -995,20 +1084,24 @@ class FinancialAIReport:
     # ---------- 4. 财务分析页 ----------
 
     def analyze_comprehensive_financial_radar(self, stock_code: str) -> str:
-        """模块7a：综合财务雷达图分析（对应3_财务分析.py顶部综合得分区域）"""
+        """模块7a：综合财务雷达图分析 - 增强数据输入"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         radar = self.get_radar_data(code)
         trend = self.get_dimension_trend(code)
+        rankings = self.get_financial_rankings(code, year=2024)
+        detail = self.get_dimension_detail(code)
+        industry_info = self.get_industry_info(code)
 
+        # 格式化雷达图数据
         radar_lines = []
         if radar['综合维度'].get('dimensions'):
             for dim, score in zip(radar['综合维度']['dimensions'], radar['综合维度']['scores']):
-                radar_lines.append(dim + ": " + str(round(score * 100, 1)) + "分")
+                radar_lines.append(f"{dim}: {round(score * 100, 1)}分")
         else:
-            radar_lines.append("数据缺失")
-        radar_text = "\n".join(radar_lines)
+            radar_lines.append("雷达图数据缺失")
 
+        # 格式化趋势数据
         trend_lines = []
         if '维度趋势' in trend:
             for dim, vals in trend['维度趋势'].items():
@@ -1017,46 +1110,121 @@ class FinancialAIReport:
                 if v2024 is not None and v5y is not None:
                     change = v2024 - v5y
                     trend_dir = "提升" if change > 0 else "下降" if change < 0 else "持平"
-                    trend_lines.append(dim + ": 2024年" + str(round(v2024, 2)) + " vs 5年均值" + str(round(v5y, 2)) + " (" + trend_dir + " " + str(round(abs(change), 2)) + ")")
-        trend_text = "\n".join(trend_lines)
+                    trend_lines.append(f"{dim}: 2024年{round(v2024, 2)} vs 5年均值{round(v5y, 2)} ({trend_dir} {round(abs(change), 2)})")
+                elif v2024 is not None:
+                    trend_lines.append(f"{dim}: 2024年{round(v2024, 2)} (5年均值: 数据缺失)")
+                elif v5y is not None:
+                    trend_lines.append(f"{dim}: 5年均值{round(v5y, 2)} (2024年: 数据缺失)")
+        else:
+            trend_lines.append("趋势数据缺失")
+
+        # 格式化详细排名数据
+        rankings_lines = []
+        metric_display_map = {
+            'roe': '权益资本利润率ROE',
+            'operating_margin': '营业利润率',
+            'roa': '总资产利润率ROA',
+            'asset_turnover': '总资产周转率',
+            'current_ratio': '流动比率',
+            'debt_ratio': '资产负债率',
+            'cash_creation_total': '总资产创现率',
+            'cash_creation_sales': '销售创现率',
+            'ebitda_margin': 'EBITDA利润率',
+        }
+        for en_key, display_name in metric_display_map.items():
+            if en_key in rankings:
+                r = rankings[en_key]
+                val = r['value']
+                median = r['median']
+                pct = r['percentile']
+                rank = r['rank']
+                if val is not None and not pd.isna(val):
+                    pct_str = f"{round(pct * 100, 1)}%" if pct is not None and not pd.isna(pct) else "N/A"
+                    rank_str = str(int(rank)) if rank is not None and not pd.isna(rank) else "N/A"
+                    vs_median = "高于" if median is not None and val > median else "低于" if median is not None else "无法对比"
+                    line = f"{display_name}: 公司值{round(val, 4)} | 行业中位数{round(median, 4) if median is not None else 'N/A'} | {vs_median}中位数 | 分位数{pct_str} | 排名{rank_str}"
+                    rankings_lines.append(line)
+
+        rankings_text = "\n".join(rankings_lines) if rankings_lines else "排名数据缺失"
+
+        # 格式化各维度详细指标数据（同时显示归一化得分+原始值）
+        detail_lines = []
+        if detail:
+            for dim_name, dim_data in detail.items():
+                detail_lines.append(f"\n【{dim_name}】")
+                indicators = dim_data.get('indicators', [])
+                scores = dim_data.get('scores', [])  # 归一化得分
+                company_values = dim_data.get('company_values', [])  # 原始值
+                medians = dim_data.get('industry_medians', [])
+                percentiles = dim_data.get('percentiles', [])
+                ranks = dim_data.get('ranks', [])
+
+                for i, ind in enumerate(indicators):
+                    score = scores[i] if i < len(scores) else 'N/A'
+                    val = company_values[i] if i < len(company_values) else 'N/A'
+                    median = medians[i] if i < len(medians) and medians[i] is not None else 'N/A'
+                    pct = percentiles[i] if i < len(percentiles) and percentiles[i] is not None else 'N/A'
+                    rank = ranks[i] if i < len(ranks) and ranks[i] is not None else 'N/A'
+
+                    score_str = f"{round(score * 100, 1)}%" if isinstance(score, (int, float)) else str(score)
+                    val_str = f"{val:.5f}" if isinstance(val, (int, float)) and not pd.isna(val) else str(val)
+                    median_str = f"{median:.5f}" if isinstance(median, (int, float)) and not pd.isna(median) else str(median)
+                    pct_str = f"{pct:.3f}" if isinstance(pct, (int, float)) and not pd.isna(pct) else str(pct)
+                    rank_str = str(int(rank)) if isinstance(rank, (int, float)) and not pd.isna(rank) else str(rank)
+
+                    detail_lines.append(f"  {ind}: 归一化得分{score_str} | 公司值{val_str} | 行业中位数{median_str} | 分位数{pct_str} | 排名{rank_str}")
+        else:
+            detail_lines.append("详细指标数据缺失")
+
+        detail_text = "\n".join(detail_lines)
 
         data_lines = [
-            "公司名称: " + company_name,
-            "综合财务雷达图数据:",
-            radar_text,
+            f"公司名称: {company_name}",
+            f"所属行业: {industry_info['三级行业']}",
             "",
-            "维度得分趋势对比:",
-            trend_text
+            "=== 综合财务雷达图数据 ===",
+            "\n".join(radar_lines),
+            "",
+            "=== 维度得分趋势对比 ===",
+            "\n".join(trend_lines),
+            "",
+            "=== 核心财务指标行业排名 ===",
+            rankings_text,
+            "",
+            "=== 各维度详细指标数据 ===",
+            detail_text
         ]
         data = "\n".join(data_lines)
 
         prompt_lines = [
-            "请基于以下综合财务雷达图和趋势数据，生成一段全面的AI解读。",
-            "严格要求："
-            "直接输出最终分析内容，"
-            "不要出现任何前言、身份说明或解释"
-            "禁止使用以下表达："
-            "1. 作为一位……"
-            "2. 根据您提供的信息……"
-            "3. 我认为……"
-            "4. 我将从……分析"
+            "请基于以下全面的财务数据，生成一段专业的综合财务雷达图AI解读。",
+            "严格要求：",
+            "直接输出最终分析内容，",
+            "不要出现任何前言、身份说明或解释",
+            "禁止使用以下表达：",
+            "1. 作为一位……",
+            "2. 根据您提供的信息……",
+            "3. 我认为……",
+            "4. 我将从……分析",
             "5. 以下是分析……",
             "要求：",
-            "1. 分析公司当前六维能力的整体画像",
+            "1. 分析公司当前六维能力的整体画像，结合具体得分",
             "2. 结合五年趋势，评价各维度的发展轨迹和改善/恶化情况",
-            "3. 指出哪些维度在持续改善，哪些在退步，分析可能原因",
-            "4. 综合评价公司的财务健康度和成长性",
-            "5. 不限制字数，充分展开分析，像一份专业的财务诊断报告",
+            "3. 结合核心财务指标排名，分析各维度的行业相对位置",
+            "4. 结合各维度详细指标数据，深入分析具体指标的强弱",
+            "5. 指出哪些维度在持续改善，哪些在退步，分析可能原因",
+            "6. 综合评价公司的财务健康度和成长性",
+            "7. 不限制字数，充分展开分析，像一份专业的财务诊断报告",
             "",
             "数据：",
             data
         ]
         prompt = "\n".join(prompt_lines)
 
-        return self.call_qwen(prompt, max_tokens=3000, temperature=0.3)
+        return self.call_qwen(prompt, max_tokens=4000, temperature=0.3)
 
     def analyze_dimension_trend(self, stock_code: str) -> str:
-        """模块7b：维度得分趋势对比分析（对应3_财务分析.py柱状图区域）"""
+        """模块7b：维度得分趋势对比分析"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         trend = self.get_dimension_trend(code)
@@ -1111,35 +1279,35 @@ class FinancialAIReport:
         return self.call_qwen(prompt, max_tokens=2500, temperature=0.3)
 
     def _format_dimension_detail(self, dim_data: Dict) -> str:
-        """辅助函数：格式化维度详细数据"""
+        """辅助函数：格式化维度详细数据 - 与前端一致（5位小数）"""
         indicators = dim_data.get('indicators', [])
-        scores = dim_data.get('scores', [])
+        company_values = dim_data.get('company_values', [])  # 原始值
         medians = dim_data.get('industry_medians', [])
         percentiles = dim_data.get('percentiles', [])
         ranks = dim_data.get('ranks', [])
 
         detail_lines = []
         for i, ind in enumerate(indicators):
-            score = scores[i] if i < len(scores) else 'N/A'
+            val = company_values[i] if i < len(company_values) else 'N/A'
             median = medians[i] if i < len(medians) and medians[i] is not None else 'N/A'
             pct = percentiles[i] if i < len(percentiles) and percentiles[i] is not None else 'N/A'
             rank = ranks[i] if i < len(ranks) and ranks[i] is not None else 'N/A'
 
-            score_str = str(round(score*100, 1)) + "%" if isinstance(score, (int, float)) else str(score)
-            median_str = str(round(median*100, 1)) + "%" if isinstance(median, (int, float)) else str(median)
-            pct_str = str(round(pct*100, 1)) + "%" if isinstance(pct, (int, float)) else str(pct)
+            val_str = f"{val:.5f}" if isinstance(val, (int, float)) and not pd.isna(val) else str(val)
+            median_str = f"{median:.5f}" if isinstance(median, (int, float)) and not pd.isna(median) else str(median)
+            pct_str = f"{pct:.3f}" if isinstance(pct, (int, float)) and not pd.isna(pct) else str(pct)
             rank_str = str(int(rank)) if isinstance(rank, (int, float)) and not pd.isna(rank) else str(rank)
 
-            line = "  " + ind + ": 得分" + score_str + " | 行业中位数" + median_str + " | 分位数" + pct_str + " | 排名" + rank_str
+            line = f"  {ind}: 公司值{val_str} | 行业中位数{median_str} | 分位数{pct_str} | 排名{rank_str}"
             detail_lines.append(line)
         return "\n".join(detail_lines)
 
-
     def analyze_profitability(self, stock_code: str) -> str:
-        """模块7c：盈利能力指标分析（对应3_财务分析.py盈利能力折叠卡片）"""
+        """模块7c：盈利能力指标分析"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         detail = self.get_dimension_detail(code)
+        rankings = self.get_financial_rankings(code, year=2024)
 
         profitability_dim = None
         for dim_name in detail.keys():
@@ -1153,12 +1321,24 @@ class FinancialAIReport:
         dim_data = detail[profitability_dim]
         detail_text = self._format_dimension_detail(dim_data)
 
+        related_rankings = []
+        for en_key, display_name in [('roe', 'ROE'), ('operating_margin', '营业利润率'), ('roa', 'ROA'), ('ebitda_margin', 'EBITDA利润率')]:
+            if en_key in rankings:
+                r = rankings[en_key]
+                pct_str = f"{round(r['percentile']*100, 1)}%" if r['percentile'] is not None else 'N/A'
+                rank_str = str(int(r['rank'])) if r['rank'] is not None and not pd.isna(r['rank']) else 'N/A'
+                val_str = f"{round(r['value'], 4)}" if r['value'] is not None else "N/A"
+                related_rankings.append(f"{display_name}: 公司值{val_str} | 分位数{pct_str} | 排名{rank_str}")
+
         data_lines = [
             "公司名称: " + company_name,
             "盈利能力维度分析:",
             "维度名称: " + profitability_dim,
             "指标详情:",
-            detail_text
+            detail_text,
+            "",
+            "相关核心指标排名:",
+            "\n".join(related_rankings) if related_rankings else "数据缺失"
         ]
         data = "\n".join(data_lines)
 
@@ -1168,8 +1348,9 @@ class FinancialAIReport:
             "1. 分析公司盈利能力的整体水平和结构特征",
             "2. 对比行业均值，评价各盈利指标的相对强弱",
             "3. 从毛利率、净利率、ROE、ROA等多角度分析盈利质量",
-            "4. 分析盈利能力的可持续性和增长潜力",
-            "5. 不限制字数，充分展开分析",
+            "4. 结合核心指标排名，分析公司在行业中的盈利地位",
+            "5. 分析盈利能力的可持续性和增长潜力",
+            "6. 不限制字数，充分展开分析",
             "",
             "数据：",
             data
@@ -1179,10 +1360,11 @@ class FinancialAIReport:
         return self.call_qwen(prompt, max_tokens=2500, temperature=0.3)
 
     def analyze_asset_efficiency(self, stock_code: str) -> str:
-        """模块7d：资产使用效率指标分析（对应3_财务分析.py资产效率折叠卡片）"""
+        """模块7d：资产使用效率指标分析"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         detail = self.get_dimension_detail(code)
+        rankings = self.get_financial_rankings(code, year=2024)
 
         efficiency_dim = None
         for dim_name in detail.keys():
@@ -1196,12 +1378,23 @@ class FinancialAIReport:
         dim_data = detail[efficiency_dim]
         detail_text = self._format_dimension_detail(dim_data)
 
+        related_rankings = []
+        for en_key, display_name in [('asset_turnover', '总资产周转率'), ('inventory_turnover', '存货周转率')]:
+            if en_key in rankings:
+                r = rankings[en_key]
+                pct_str = f"{round(r['percentile']*100, 1)}%" if r['percentile'] is not None else 'N/A'
+                rank_str = str(int(r['rank'])) if r['rank'] is not None and not pd.isna(r['rank']) else 'N/A'
+                val_str = f"{round(r['value'], 4)}" if r['value'] is not None else "N/A"
+                related_rankings.append(f"{display_name}: 公司值{val_str} | 分位数{pct_str} | 排名{rank_str}")
         data_lines = [
             "公司名称: " + company_name,
             "资产使用效率维度分析:",
             "维度名称: " + efficiency_dim,
             "指标详情:",
-            detail_text
+            detail_text,
+            "",
+            "相关核心指标排名:",
+            "\n".join(related_rankings) if related_rankings else "数据缺失"
         ]
         data = "\n".join(data_lines)
 
@@ -1221,8 +1414,9 @@ class FinancialAIReport:
             "1. 分析公司资产运营效率的整体水平",
             "2. 对比行业均值，评价各效率指标的相对强弱",
             "3. 从总资产周转率、存货周转率、应收账款周转率等角度分析资产利用效率",
-            "4. 分析资产效率对ROE的驱动作用",
-            "5. 不限制字数，充分展开分析",
+            "4. 结合核心指标排名，分析公司在行业中的效率地位",
+            "5. 分析资产效率对ROE的驱动作用",
+            "6. 不限制字数，充分展开分析",
             "",
             "数据：",
             data
@@ -1232,7 +1426,7 @@ class FinancialAIReport:
         return self.call_qwen(prompt, max_tokens=2500, temperature=0.3)
 
     def analyze_liquidity(self, stock_code: str) -> str:
-        """模块7e：流动性指标分析（对应3_财务分析.py流动性折叠卡片）"""
+        """模块7e：流动性指标分析"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         detail = self.get_dimension_detail(code)
@@ -1284,7 +1478,7 @@ class FinancialAIReport:
         return self.call_qwen(prompt, max_tokens=2500, temperature=0.3)
 
     def analyze_cash_creation(self, stock_code: str) -> str:
-        """模块7f：现金创造能力指标分析（对应3_财务分析.py现金创造折叠卡片）"""
+        """模块7f：现金创造能力指标分析"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         detail = self.get_dimension_detail(code)
@@ -1336,7 +1530,7 @@ class FinancialAIReport:
         return self.call_qwen(prompt, max_tokens=2500, temperature=0.3)
 
     def analyze_solvency(self, stock_code: str) -> str:
-        """模块7g：偿债能力指标分析（对应3_财务分析.py偿债能力折叠卡片）"""
+        """模块7g：偿债能力指标分析"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         detail = self.get_dimension_detail(code)
@@ -1388,7 +1582,7 @@ class FinancialAIReport:
         return self.call_qwen(prompt, max_tokens=2500, temperature=0.3)
 
     def analyze_shareholder_return(self, stock_code: str) -> str:
-        """模块7h：股东收益指标分析（对应3_财务分析.py股东收益折叠卡片）"""
+        """模块7h：股东收益指标分析"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         detail = self.get_dimension_detail(code)
@@ -1442,15 +1636,14 @@ class FinancialAIReport:
     # ---------- 5. 管理建议部分 ----------
 
     def analyze_basic_conclusion(self, stock_code: str) -> str:
-        """模块8a：基本结论（经营状况、财务健康度、行业地位、发展潜力）"""
+        """模块8a：基本结论"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         industry_info = self.get_industry_info(code)
-        rankings = self.get_financial_rankings(code)
+        rankings = self.get_financial_rankings(code, year=2024)
         radar = self.get_radar_data(code)
         trend = self.get_dimension_trend(code)
 
-        # 计算各维度的综合判断
         advantages = []
         weaknesses = []
         metric_display_map = {
@@ -1459,7 +1652,7 @@ class FinancialAIReport:
             'roa': '总资产利润率ROA',
             'asset_turnover': '总资产周转率',
             'current_ratio': '流动比率',
-            'debt_ratio': '总资产负债率',
+            'debt_ratio': '资产负债率',
         }
         for en_key, display_name in metric_display_map.items():
             if en_key in rankings:
@@ -1551,11 +1744,10 @@ class FinancialAIReport:
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
         industry_info = self.get_industry_info(code)
-        rankings = self.get_financial_rankings(code)
+        rankings = self.get_financial_rankings(code, year=2024)
         radar = self.get_radar_data(code)
         trend = self.get_dimension_trend(code)
 
-        # 自动识别优势和短板
         advantages = []
         weaknesses = []
         metric_display_map = {
@@ -1564,7 +1756,7 @@ class FinancialAIReport:
             'roa': '总资产利润率ROA',
             'asset_turnover': '总资产周转率',
             'current_ratio': '流动比率',
-            'debt_ratio': '总资产负债率',
+            'debt_ratio': '资产负债率',
             'cash_creation_total': '总资产创现率',
             'cash_creation_sales': '销售创现率',
         }
@@ -1647,17 +1839,15 @@ class FinancialAIReport:
         """模块8c：风险提示"""
         code = self._normalize_code(stock_code)
         company_name = self.get_company_name(code)
-        rankings = self.get_financial_rankings(code)
+        rankings = self.get_financial_rankings(code, year=2024)
         radar = self.get_radar_data(code)
         trend = self.get_dimension_trend(code)
 
-        # 识别风险点
         risks = []
         risk_details = []
 
-        # 英文 key -> (中文显示名, 风险判断逻辑, 风险标签)
         risk_metrics = {
-            'debt_ratio': ('总资产负债率', lambda pct: pct > 0.7, '资产负债率偏高'),
+            'debt_ratio': ('资产负债率', lambda pct: pct > 0.7, '资产负债率偏高'),
             'current_ratio': ('流动比率', lambda pct: pct < 0.3, '流动性不足'),
         }
         for en_key, (display_name, check_risk, risk_label) in risk_metrics.items():
@@ -1672,14 +1862,12 @@ class FinancialAIReport:
                         rd += " | 排名" + str(int(r['rank']) if r['rank'] is not None and not pd.isna(r['rank']) else 'N/A')
                         risk_details.append(rd)
 
-        # 雷达图弱项风险
         radar_risks = []
         if radar['综合维度'].get('dimensions'):
             for dim, score in zip(radar['综合维度']['dimensions'], radar['综合维度']['scores']):
                 if score < 0.3:
                     radar_risks.append(dim + "能力严重不足 (" + str(round(score * 100, 1)) + "分)")
 
-        # 趋势风险
         trend_risks = []
         if '维度趋势' in trend:
             for dim, vals in trend['维度趋势'].items():
@@ -1797,7 +1985,7 @@ class FinancialAIReport:
                 '公司名称': self.get_company_name(code),
                 '行业信息': self.get_industry_info(code)
             },
-            '财务排名': self.get_financial_rankings(code),
+            '财务排名': self.get_financial_rankings(code, year=2024),
             '雷达图数据': self.get_radar_data(code),
             '维度趋势': self.get_dimension_trend(code),
             '维度详情': self.get_dimension_detail(code)
@@ -1807,61 +1995,19 @@ class FinancialAIReport:
 # ==================== 便捷函数 ====================
 
 def analyze_module(stock_code: str, module: str, api_key: str, model: str = "qwen-turbo") -> str:
-    """
-    快速分析指定模块
-
-    Args:
-        stock_code: 股票代码
-        module: 模块名称
-            # 行业分类页
-            - 'overview' -> 公司概况
-            - 'industry' -> 行业重分类
-            - 'keywords' -> 行业关键词
-            - 'similar' -> 相似公司
-            # 公司概况页 - 财务排名
-            - 'roe_ranking' -> ROE排名
-            - 'margin_ranking' -> 营业利润率排名
-            - 'roa_ranking' -> ROA排名
-            - 'rankings_overview' -> 财务排名总览
-            # 公司概况页 - 雷达图
-            - 'comprehensive_radar' -> 综合维度雷达图
-            - 'indicator_radar' -> 指标级雷达图
-            # 财务分析页
-            - 'financial_radar' -> 综合财务雷达图
-            - 'dimension_trend' -> 维度得分趋势
-            - 'profitability' -> 盈利能力
-            - 'asset_efficiency' -> 资产使用效率
-            - 'liquidity' -> 流动性指标
-            - 'cash_creation' -> 现金创造能力
-            - 'solvency' -> 偿债能力
-            - 'shareholder_return' -> 股东收益
-            # 管理建议页
-            - 'conclusion' -> 基本结论
-            - 'suggestions' -> 管理建议
-            - 'risk' -> 风险提示
-        api_key: API Key
-        model: 模型名称
-
-    Returns:
-        AI解读文字
-    """
     service = FinancialAIReport(api_key=api_key, model=model)
 
     module_map = {
-        # 行业分类页
         'overview': service.analyze_company_overview,
         'industry': service.analyze_industry_reclassification,
         'keywords': service.analyze_industry_keywords,
         'similar': service.analyze_similar_companies,
-        # 公司概况页 - 财务排名
         'roe_ranking': service.analyze_roe_ranking,
         'margin_ranking': service.analyze_operating_margin_ranking,
         'roa_ranking': service.analyze_roa_ranking,
         'rankings_overview': service.analyze_financial_rankings_overview,
-        # 公司概况页 - 雷达图
         'comprehensive_radar': service.analyze_comprehensive_radar,
         'indicator_radar': service.analyze_indicator_radar,
-        # 财务分析页
         'financial_radar': service.analyze_comprehensive_financial_radar,
         'dimension_trend': service.analyze_dimension_trend,
         'profitability': service.analyze_profitability,
@@ -1870,7 +2016,6 @@ def analyze_module(stock_code: str, module: str, api_key: str, model: str = "qwe
         'cash_creation': service.analyze_cash_creation,
         'solvency': service.analyze_solvency,
         'shareholder_return': service.analyze_shareholder_return,
-        # 管理建议页
         'conclusion': service.analyze_basic_conclusion,
         'suggestions': service.analyze_management_suggestions,
         'risk': service.analyze_risk_warnings,
@@ -1897,7 +2042,6 @@ if __name__ == "__main__":
     else:
         service = FinancialAIReport(api_key=api_key, model="qwen-turbo")
 
-        # 测试所有模块
         modules = [
             ('overview', '公司概况'),
             ('industry', '行业重分类'),
