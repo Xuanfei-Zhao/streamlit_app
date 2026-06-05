@@ -11,7 +11,7 @@ def load_stock_list():
 
 # 页面配置
 st.set_page_config(
-    page_title='上市公司分析平台',
+    page_title='上市公司行业重分类智能分析平台',
     page_icon='📊',
     layout='wide',
     initial_sidebar_state='expanded'
@@ -102,7 +102,7 @@ with st.sidebar:
 # 主页内容
 # 欢迎页面（未选择公司时显示）
 if not st.session_state.selected_company:
-    st.markdown("# 📊 欢迎使用上市公司分析平台")
+    st.markdown("# 📊 欢迎使用上市公司行业重分类智能分析平台")
     st.markdown("本平台提供上市公司的深度分析，包括：")
     
     # 自定义CSS：为特定列添加左内边距

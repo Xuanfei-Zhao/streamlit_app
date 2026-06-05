@@ -396,7 +396,7 @@ else:
         st.plotly_chart(fig_comp, use_container_width=True)
     else:
         st.info("无可用维度数据，无法绘制综合雷达图")
-
+                                                                                                                                                                                                       
 service = st.session_state.ai_service   
 with st.expander("🤖 AI解读：综合财务雷达图"):
     with st.spinner("AI 分析中..."):

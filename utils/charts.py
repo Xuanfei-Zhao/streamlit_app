@@ -31,7 +31,7 @@ def create_radar_chart(categories, values, title="雷达图"):
         polar=dict(
             radialaxis=dict(
                 visible=True,
-                range=[min(values)*0.8, max(values)*1.2]
+                range=[0, 100]
             )
         ),
         showlegend=True,

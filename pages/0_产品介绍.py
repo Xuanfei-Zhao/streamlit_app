@@ -5,7 +5,7 @@ from pathlib import Path
 
 # 页面配置
 st.set_page_config(
-    page_title='上市公司行业重分类智能财务机器人',
+    page_title='上市公司行业重分类智能分析平台',
     page_icon='📖',
     layout='wide'
 )
@@ -101,7 +101,7 @@ def build_tree(df):
         l3_by_parent.setdefault(row['parent_code'], []).append((row['code'], row['name']))
     return level1, l2_by_parent, l3_by_parent
 
-st.title("📂 产业分类目录")
+st.title("📂 行业分类目录")
 st.markdown("点击一级或二级标题展开/折叠，三级行业以表格展示。")
 
 df = load_data()
