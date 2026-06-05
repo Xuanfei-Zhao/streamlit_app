@@ -20,7 +20,6 @@ from utils.data_loader import (
 from utils.charts import create_radar_chart, create_line_chart
 
 st.set_page_config(page_title="公司概况", page_icon="🏢", layout="wide")
-company_code_norm = str(st.session_state.get("selected_company", "")).strip().zfill(6)
 stock_code = st.session_state.selected_company
 
 
@@ -88,7 +87,7 @@ service = st.session_state.ai_service   # 确保这行在调用之前执行
 
 with st.expander("🤖 AI解读：公司概况"):
     with st.spinner("AI 分析中..."):
-        reclass_text = service.analyze_company_overview(stock_code=company_code_norm)
+        reclass_text = service.analyze_company_overview(stock_code=stock_code)
     st.markdown(reclass_text)
 
 
@@ -273,7 +272,7 @@ with tab1:
 
 with st.expander("🤖 AI解读：综合维度雷达图"):
     with st.spinner("AI 分析中..."):
-        reclass_text = service.analyze_comprehensive_radar(stock_code=company_code_norm)
+        reclass_text = service.analyze_comprehensive_radar(stock_code)
     st.markdown(reclass_text)
 
 

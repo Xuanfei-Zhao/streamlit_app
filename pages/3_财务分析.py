@@ -10,7 +10,6 @@ from difflib import get_close_matches
 st.set_page_config(page_title="财务分析", layout="wide")
 st.title("📊 财务分析")
 
-company_code_norm = str(st.session_state.get("selected_company", "")).strip().zfill(6)
 stock_code = st.session_state.selected_company
 
 # ---------- 辅助函数：标准化公司代码（去除 .0，补零到6位）----------
@@ -401,7 +400,7 @@ else:
 service = st.session_state.ai_service   
 with st.expander("🤖 AI解读：综合财务雷达图"):
     with st.spinner("AI 分析中..."):
-        reclass_text = service.analyze_comprehensive_financial_radar(stock_code=company_code_norm)
+        reclass_text = service.analyze_comprehensive_financial_radar(stock_code)
     st.markdown(reclass_text)
 
 st.markdown("---")
